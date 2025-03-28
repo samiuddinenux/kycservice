@@ -56,6 +56,12 @@ public class KycService {
 
     public Mono<String> initiateKyc(KycRequest request, String token) {
         logger.debug("Initiating KYC for email: {}", request.getEmail());
+        // Validate token before proceeding
+        if (token == null || token.trim().isEmpty() || !token.startsWith("Bearer ")) {
+            logger.error("Invalid or missing token for KYC initiation: {}", token);
+            return Mono.error(new CustomException("Valid Bearer token is required", HttpStatus.UNAUTHORIZED));
+        }
+        logger.debug("Proceeding with token: {}", token);
         return verifyUser(request.getEmail(), token)
                 .flatMap(userData -> {
                     String externalId = (String) userData.get("externalId");
@@ -167,28 +173,32 @@ public class KycService {
                 .map(result -> (String) result.get("token"))
                 .doOnError(e -> logger.error("Sumsub token generation failed: {}", e.getMessage()));
     }
-
-private Mono<Map<String, Object>> verifyUser(String email, String token) {
-    return webClient.get()
-            .uri(authServiceUrl + "/user") // Append only "/user" if authServiceUrl ends with "/api/auth/"
-            .header("Authorization", token != null ? token : "Bearer dummy")
-            .retrieve()
-            .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-            .flatMap(response -> {
-                Map<String, Object> userData = (Map<String, Object>) response.get("data");
-                if (userData == null) {
-                    logger.error("No 'data' field in auth response for email: {}", email);
-                    return Mono.error(new CustomException("Invalid auth response", HttpStatus.INTERNAL_SERVER_ERROR));
-                }
-                if (!email.equals(userData.get("email"))) {
-                    logger.warn("Email mismatch: request={} vs response={}", email, userData.get("email"));
-                    return Mono.error(new CustomException("User not found or email mismatch", HttpStatus.NOT_FOUND));
-                }
-                return Mono.just(userData);
-            })
-            .doOnNext(data -> logger.debug("Verified user data: {}", data))
-            .doOnError(e -> logger.error("Failed to verify user {}: {}", email, e.getMessage()));
-}
+    private Mono<Map<String, Object>> verifyUser(String email, String token) {
+        logger.debug("Verifying user with email: {} and token: {}", email, token);
+        if (token == null || token.trim().isEmpty() || !token.startsWith("Bearer ")) {
+            logger.error("Invalid or missing token for user verification: {}", token);
+            return Mono.error(new CustomException("Valid Bearer token is required", HttpStatus.UNAUTHORIZED));
+        }
+        return webClient.get()
+                .uri(authServiceUrl + "/user") // Assumes authServiceUrl is correctly set
+                .header("Authorization", token) // Pass token as-is, expecting "Bearer <token>"
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .flatMap(response -> {
+                    Map<String, Object> userData = (Map<String, Object>) response.get("data");
+                    if (userData == null) {
+                        logger.error("No 'data' field in auth response for email: {}", email);
+                        return Mono.error(new CustomException("Invalid auth response", HttpStatus.INTERNAL_SERVER_ERROR));
+                    }
+                    if (!email.equals(userData.get("email"))) {
+                        logger.warn("Email mismatch: request={} vs response={}", email, userData.get("email"));
+                        return Mono.error(new CustomException("User not found or email mismatch", HttpStatus.NOT_FOUND));
+                    }
+                    return Mono.just(userData);
+                })
+                .doOnNext(data -> logger.debug("Verified user data: {}", data))
+                .doOnError(e -> logger.error("Failed to verify user {}: {}", email, e.getMessage()));
+    }
     public Mono<String> saveInitialKycRecord(String externalUserId, String accessToken) {
         return kycRepository.findByExternalUserId(externalUserId)
                 .flatMap(existingRecord -> {
