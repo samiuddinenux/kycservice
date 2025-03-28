@@ -28,7 +28,7 @@ public class JwtAuthenticationFilter implements WebFilter {
         String header = exchange.getRequest().getHeaders().getFirst("Authorization");
         logger.debug("Received Authorization header: {}", header);
 
-        if (header == null || !header.startsWith("Bearer "))
+        if (header == null || !header.startsWith("Bearer ")) {
             logger.warn("No valid Bearer token found in header");
             return chain.filter(exchange);
         }

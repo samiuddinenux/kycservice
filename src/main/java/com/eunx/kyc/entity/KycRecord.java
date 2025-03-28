@@ -8,7 +8,6 @@ import java.time.LocalDateTime;
 public class KycRecord {
 
     @Id
-
     private String externalUserId;
     private String applicantId;
     private String reviewStatus;

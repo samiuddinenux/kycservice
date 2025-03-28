@@ -24,8 +24,8 @@ public class SecurityConfig {
                 .authorizeExchange(exchanges -> exchanges
                         .pathMatchers("/api/kyc/webhook").permitAll()
                         .pathMatchers("/api/kyc/**").authenticated()
-                        .pathMatchers("/api/kyc/user/Uuid").permitAll()
-                        .anyExchange().permitAll() .notifyAll()
+                        .pathMatchers("/api/kyc/**").permitAll()
+                        .anyExchange().permitAll()
                 )
                 .addFilterAt(jwtAuthenticationFilter, SecurityWebFiltersOrder.AUTHENTICATION)
                 .build();
