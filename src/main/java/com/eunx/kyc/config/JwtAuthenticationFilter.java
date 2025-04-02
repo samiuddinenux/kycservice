@@ -4,6 +4,7 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.web.server.ServerWebExchange;
@@ -24,17 +25,31 @@ public class JwtAuthenticationFilter implements WebFilter {
     }
 
     @Override
-        public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+        // Skip authentication for OPTIONS requests to allow CORS preflight
+        if (exchange.getRequest().getMethod() == HttpMethod.OPTIONS) {
+            logger.debug("Skipping JWT authentication for OPTIONS request to {}", exchange.getRequest().getPath());
+            return chain.filter(exchange);
+        }
+
         String header = exchange.getRequest().getHeaders().getFirst("Authorization");
-        logger.debug("Received Authorization header: {}", header);
+        logger.debug("Received Authorization header for {} {}: {}",
+                exchange.getRequest().getMethod(),
+                exchange.getRequest().getPath(),
+                header);
 
         if (header == null || !header.startsWith("Bearer ")) {
-            logger.warn("No valid Bearer token found in header");
+            logger.warn("No valid Bearer token found in Authorization header for {} {}",
+                    exchange.getRequest().getMethod(),
+                    exchange.getRequest().getPath());
             return chain.filter(exchange);
         }
 
         String token = header.substring(7);
-        logger.debug("Extracted JWT token: {}", token);
+        logger.debug("Extracted JWT token for {} {}: {}",
+                exchange.getRequest().getMethod(),
+                exchange.getRequest().getPath(),
+                token);
 
         return Mono.fromCallable(() -> {
             try {
@@ -44,20 +59,38 @@ public class JwtAuthenticationFilter implements WebFilter {
                         .parseClaimsJws(token)
                         .getBody();
                 String username = claims.getSubject();
-                logger.debug("Parsed username from JWT: {}", username);
+                if (username == null) {
+                    logger.warn("No subject (username) found in JWT token for {} {}",
+                            exchange.getRequest().getMethod(),
+                            exchange.getRequest().getPath());
+                    return null;
+                }
+                logger.debug("Parsed username from JWT for {} {}: {}",
+                        exchange.getRequest().getMethod(),
+                        exchange.getRequest().getPath(),
+                        username);
                 return username;
             } catch (Exception e) {
-                logger.error("JWT validation failed: {}", e.getMessage());
+                logger.error("JWT validation failed for {} {}: {}",
+                        exchange.getRequest().getMethod(),
+                        exchange.getRequest().getPath(),
+                        e.getMessage());
                 return null;
             }
         }).flatMap(username -> {
             if (username != null) {
                 UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(
                         username, null, Collections.emptyList());
+                logger.debug("Setting authentication for user {} for {} {}",
+                        username,
+                        exchange.getRequest().getMethod(),
+                        exchange.getRequest().getPath());
                 return chain.filter(exchange)
                         .contextWrite(ReactiveSecurityContextHolder.withAuthentication(auth));
             }
-            logger.warn("No username extracted from token");
+            logger.warn("No valid username extracted from token for {} {}",
+                    exchange.getRequest().getMethod(),
+                    exchange.getRequest().getPath());
             return chain.filter(exchange);
         });
     }
