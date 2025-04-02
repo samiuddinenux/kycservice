@@ -38,10 +38,10 @@
 			<scope>runtime</scope>
 		</dependency>
 		<!-- Flyway for database migrations -->
-		<dependency>
-			<groupId>org.flywaydb</groupId>
-			<artifactId>flyway-core</artifactId>
-		</dependency>
+<!--		<dependency>-->
+<!--			<groupId>org.flywaydb</groupId>-->
+<!--			<artifactId>flyway-core</artifactId>-->
+<!--		</dependency>-->
 		<!-- Resilience4j for retry logic -->
 		<dependency>
 			<groupId>io.github.resilience4j</groupId>
