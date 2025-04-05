@@ -1,6 +1,5 @@
 package com.eunx.kyc.service;
 
-import com.eunx.kyc.dto.KycRequest;
 import com.eunx.kyc.entity.KycRecord;
 import com.eunx.kyc.exception.CustomException;
 import com.eunx.kyc.repository.KycRepository;
@@ -31,64 +30,48 @@ public class KycService {
 
     private static final Logger logger = LoggerFactory.getLogger(KycService.class);
 
-    @Autowired
-    private KycRepository kycRepository;
-    @Autowired
-    private R2dbcEntityTemplate r2dbcEntityTemplate;
-    @Autowired
-    private WebClient webClient;
+    @Autowired private KycRepository kycRepository;
+    @Autowired private R2dbcEntityTemplate r2dbcEntityTemplate;
+    @Autowired private WebClient webClient;
 
-    @Value("${sumsub.api.url}")
-    private String sumsubApiUrl;
+    @Value("${sumsub.api.url}") private String sumsubApiUrl;
+    @Value("${sumsub.api.token}") private String sumsubApiToken;
+    @Value("${sumsub.api.secret}") private String sumsubApiSecret;
+    @Value("${sumsub.verification.level}") private String sumsubVerificationLevel;
+    @Value("${auth.service.url}") private String authServiceUrl;
 
-    @Value("${sumsub.api.token}")
-    private String sumsubApiToken;
-
-    @Value("${sumsub.api.secret}")
-    private String sumsubApiSecret;
-
-    @Value("${sumsub.verification.level}")
-    private String sumsubVerificationLevel;
-
-    @Value("${auth.service.url}")
-    private String authServiceUrl;
-
-
-    public Mono<String> initiateKyc(KycRequest request, String token) {
-        logger.debug("Initiating KYC for email: {}", request.getEmail());
-        // Validate token before proceeding
+    public Mono<String> initiateKyc(String token) {
+        logger.debug("Initiating KYC with token: {}", token);
         if (token == null || token.trim().isEmpty() || !token.startsWith("Bearer ")) {
             logger.error("Invalid or missing token for KYC initiation: {}", token);
             return Mono.error(new CustomException("Valid Bearer token is required", HttpStatus.UNAUTHORIZED));
         }
-        logger.debug("Proceeding with token: {}", token);
-        return verifyUser(request.getEmail(), token)
+        return verifyUserFromToken(token)
                 .flatMap(userData -> {
                     String externalId = (String) userData.get("externalId");
+                    String email = (String) userData.get("email");
                     if (externalId == null || externalId.isEmpty()) {
-                        logger.warn("No externalId found for email: {}. Cannot proceed with KYC.", request.getEmail());
+                        logger.warn("No externalId found for token. Cannot proceed with KYC.");
                         return Mono.error(new CustomException("User externalId not found", HttpStatus.BAD_REQUEST));
                     }
                     logger.debug("Using externalId: {}", externalId);
                     return kycRepository.findByExternalUserId(externalId)
                             .switchIfEmpty(Mono.just(new KycRecord()))
                             .flatMap(existingRecord -> {
-                                logger.debug("Existing KYC record: {}", existingRecord);
                                 if (existingRecord.getExternalUserId() != null && existingRecord.isVerified()) {
                                     logger.warn("KYC already verified for externalId: {}", externalId);
                                     return Mono.error(new CustomException("KYC already verified", HttpStatus.BAD_REQUEST));
                                 }
                                 return generateSumsubAccessToken(externalId)
                                         .doOnNext(accessToken -> logger.debug("Generated Sumsub token: {}", accessToken))
-                                        .flatMap(accessToken -> saveInitialKycRecord(externalId, accessToken))
-                                        .doOnError(e -> logger.error("Failed to initiate KYC for externalId: {}", externalId, e));
+                                        .flatMap(accessToken -> saveInitialKycRecord(externalId, accessToken));
                             });
                 })
-                .doOnError(e -> logger.error("KYC initiation failed for email: {}", request.getEmail(), e));
+                .doOnError(e -> logger.error("KYC initiation failed: {}", e.getMessage()));
     }
 
     public Mono<String> getKycStatusFromSumsub(String externalUserId) {
-        String encodedUserId = java.net.URLEncoder.encode(externalUserId, StandardCharsets.UTF_8);
+        String encodedUserId = URLEncoder.encode(externalUserId, StandardCharsets.UTF_8);
         String url = sumsubApiUrl + "/resources/applicants/-;externalUserId=" + encodedUserId + "/one";
         String timestamp = String.valueOf(System.currentTimeMillis() / 1000L);
         String method = "GET";
@@ -102,8 +85,7 @@ public class KycService {
                 .header("X-App-Access-Ts", timestamp)
                 .header("X-App-Access-Sig", signature)
                 .retrieve()
-                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {
-                })
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                 .map(result -> {
                     Map<String, Object> review = (Map<String, Object>) result.get("review");
                     return review != null ? (String) review.get("reviewStatus") : "pending";
@@ -151,10 +133,8 @@ public class KycService {
         String url = sumsubApiUrl + path;
         String timestamp = String.valueOf(System.currentTimeMillis() / 1000L);
         String method = "POST";
-        String body = "";  // Single declaration for signature
+        String body = "";
         String signature = generateSumsubSignature(timestamp, method, path, body);
-
-        logger.debug("Sumsub Access Token Request: URL={}, Token={}, Timestamp={}, Signature={}", url, sumsubApiToken, timestamp, signature);
 
         return webClient.post()
                 .uri(url)
@@ -163,42 +143,42 @@ public class KycService {
                 .header("X-App-Access-Sig", signature)
                 .contentType(MediaType.APPLICATION_JSON)
                 .retrieve()
-                .onStatus(HttpStatus.UNAUTHORIZED::equals, response ->
-                        response.bodyToMono(String.class)
-                                .map(errorBody -> {  // Renamed to avoid confusion
-                                    logger.error("Sumsub 401 Response: {}", errorBody);
-                                    return new CustomException("Sumsub 401: " + errorBody, HttpStatus.UNAUTHORIZED);
-                                }))
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                 .map(result -> (String) result.get("token"))
                 .doOnError(e -> logger.error("Sumsub token generation failed: {}", e.getMessage()));
     }
-    private Mono<Map<String, Object>> verifyUser(String email, String token) {
-        logger.debug("Verifying user with email: {} and token: {}", email, token);
-        if (token == null || token.trim().isEmpty() || !token.startsWith("Bearer ")) {
-            logger.error("Invalid or missing token for user verification: {}", token);
-            return Mono.error(new CustomException("Valid Bearer token is required", HttpStatus.UNAUTHORIZED));
-        }
+
+    private Mono<Map<String, Object>> verifyUserFromToken(String token) {
+        logger.debug("Verifying user with token: {}", token);
         return webClient.get()
-                .uri(authServiceUrl + "/user") // Assumes authServiceUrl is correctly set
-                .header("Authorization", token) // Pass token as-is, expecting "Bearer <token>"
+                .uri(authServiceUrl + "/user")
+                .header("Authorization", token)
                 .retrieve()
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
                 .flatMap(response -> {
                     Map<String, Object> userData = (Map<String, Object>) response.get("data");
                     if (userData == null) {
-                        logger.error("No 'data' field in auth response for email: {}", email);
+                        logger.error("No 'data' field in auth response for token");
                         return Mono.error(new CustomException("Invalid auth response", HttpStatus.INTERNAL_SERVER_ERROR));
                     }
+                    return Mono.just(userData);
+                })
+                .doOnNext(data -> logger.debug("Verified user data: {}", data))
+                .doOnError(e -> logger.error("Failed to verify user: {}", e.getMessage()));
+    }
+
+    private Mono<Map<String, Object>> verifyUser(String email, String token) {
+        // This method remains for backward compatibility or other uses
+        return verifyUserFromToken(token != null ? token : "Bearer dummy")
+                .flatMap(userData -> {
                     if (!email.equals(userData.get("email"))) {
                         logger.warn("Email mismatch: request={} vs response={}", email, userData.get("email"));
                         return Mono.error(new CustomException("User not found or email mismatch", HttpStatus.NOT_FOUND));
                     }
                     return Mono.just(userData);
-                })
-                .doOnNext(data -> logger.debug("Verified user data: {}", data))
-                .doOnError(e -> logger.error("Failed to verify user {}: {}", email, e.getMessage()));
+                });
     }
+
     public Mono<String> saveInitialKycRecord(String externalUserId, String accessToken) {
         return kycRepository.findByExternalUserId(externalUserId)
                 .flatMap(existingRecord -> {

@@ -1,8 +1,7 @@
 package com.eunx.kyc.controller;
 
-import com.eunx.kyc.dto.KycRequest;
 import com.eunx.kyc.service.KycService;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.type.TypeReference; // Add this import
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,45 +33,64 @@ public class KycController {
     private String sumsubApiSecret;
 
     @PostMapping("/initiate")
-    public Mono<ResponseEntity<String>> initiateKyc(@RequestHeader("Authorization") String token,
-                                                    @RequestBody KycRequest request) {
-        logger.debug("Starting initiateKyc for email: {}", request.getEmail());
+    public Mono<ResponseEntity<Map<String, Object>>> initiateKyc(@RequestHeader("Authorization") String token) {
+        logger.debug("Starting initiateKyc with token: {}", token);
         return ReactiveSecurityContextHolder.getContext()
-                .map(context -> context.getAuthentication().getName())
-                .flatMap(authenticatedEmail -> {
-                    if (!authenticatedEmail.equals(request.getEmail())) {
-                        logger.warn("Token mismatch: {} vs {}", authenticatedEmail, request.getEmail());
-                        return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Token mismatch"));
-                    }
-                    logger.info("Received KYC initiation request for email: {}", request.getEmail());
-                    return kycService.initiateKyc(request, token)
-                            .map(ResponseEntity::ok)
+                .map(context -> context.getAuthentication().getName()) // Get authenticated email
+                .flatMap(email -> {
+                    logger.info("Received KYC initiation request for email: {}", email);
+                    return kycService.initiateKyc(token)
+                            .map(accessToken -> ResponseEntity.ok(Map.<String, Object>of(
+                                    "status", "success",
+                                    "accessToken", accessToken,
+                                    "message", "KYC initiated successfully"
+                            )))
                             .onErrorResume(e -> Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                                    .body("KYC initiation failed: " + e.getMessage())));
-                });
+                                    .body(Map.<String, Object>of(
+                                            "status", "error",
+                                            "message", "KYC initiation failed: " + e.getMessage()
+                                    ))));
+                })
+                .defaultIfEmpty(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(Map.<String, Object>of(
+                                "status", "error",
+                                "message", "Invalid or missing authentication"
+                        )));
     }
 
     @PostMapping("/webhook")
-    public ResponseEntity<String> handleWebhook(@RequestBody byte[] rawBody,
-                                                @RequestHeader("x-payload-digest") String receivedDigest,
-                                                @RequestHeader("x-payload-digest-alg") String digestAlg) {
+    public ResponseEntity<Map<String, Object>> handleWebhook(@RequestBody byte[] rawBody,
+                                                             @RequestHeader("x-payload-digest") String receivedDigest,
+                                                             @RequestHeader("x-payload-digest-alg") String digestAlg) {
         logger.info("Received webhook with digest: {}", receivedDigest);
         String calculatedDigest = calculateHmac(rawBody, sumsubApiSecret, digestAlg);
         if (!receivedDigest.equals(calculatedDigest)) {
             logger.warn("Invalid webhook signature: received={}, calculated={}", receivedDigest, calculatedDigest);
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid signature");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.<String, Object>of(
+                            "status", "error",
+                            "message", "Invalid signature"
+                    ));
         }
 
         try {
-            Map<String, Object> webhookData = objectMapper.readValue(rawBody, new TypeReference<>() {});
+            Map<String, Object> webhookData = objectMapper.readValue(rawBody, new TypeReference<Map<String, Object>>() {});
             logger.info("Webhook payload: {}", webhookData);
             kycService.updateKycStatus(webhookData);
-            return ResponseEntity.ok("Webhook processed");
+            return ResponseEntity.ok(Map.<String, Object>of(
+                    "status", "success",
+                    "message", "Webhook processed"
+            ));
         } catch (Exception e) {
             logger.error("Failed to parse webhook payload: {}", e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Invalid payload");
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.<String, Object>of(
+                            "status", "error",
+                            "message", "Invalid payload: " + e.getMessage()
+                    ));
         }
     }
+
     @GetMapping("/status")
     public Mono<ResponseEntity<Map<String, Object>>> getKycStatus(@RequestHeader("Authorization") String token) {
         return ReactiveSecurityContextHolder.getContext()
@@ -81,7 +99,10 @@ public class KycController {
                     if (email == null || email.isEmpty()) {
                         logger.warn("Invalid or missing authentication for KYC status request");
                         return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                                .body(Map.of("error", "Invalid or expired token")));
+                                .body(Map.<String, Object>of(
+                                        "status", "error",
+                                        "message", "Invalid or expired token"
+                                )));
                     }
                     logger.info("Fetching KYC status for: {}", email);
                     return kycService.getKycStatusFromSumsubByEmail(email)
@@ -89,33 +110,38 @@ public class KycController {
                                     .then(kycService.getKycRecordFromDbByEmail(email))
                                     .map(record -> {
                                         boolean isKycComplete = "completed".equalsIgnoreCase(record.getReviewStatus()) && record.isVerified();
-                                        Map<String, Object> response = Map.of(
-                                                "status", record.getReviewStatus(),
+                                        return ResponseEntity.ok(Map.<String, Object>of(
+                                                "status", "success",
+                                                "kycStatus", record.getReviewStatus(),
                                                 "require", !isKycComplete
-                                        );
-                                        return ResponseEntity.ok(response);
+                                        ));
                                     }))
                             .onErrorResume(e -> {
                                 logger.warn("Sumsub fetch failed, falling back to DB: {}", e.getMessage());
                                 return kycService.getKycRecordFromDbByEmail(email)
                                         .map(record -> {
                                             boolean isKycComplete = "completed".equalsIgnoreCase(record.getReviewStatus()) && record.isVerified();
-                                            Map<String, Object> response = Map.of(
-                                                    "status", record.getReviewStatus(),
+                                            return ResponseEntity.ok(Map.<String, Object>of(
+                                                    "status", "success",
+                                                    "kycStatus", record.getReviewStatus(),
                                                     "require", !isKycComplete
-                                            );
-                                            return ResponseEntity.ok(response);
+                                            ));
                                         })
                                         .onErrorResume(dbError -> {
                                             logger.error("No KYC record in DB: {}", dbError.getMessage());
-                                            Map<String, Object> response = Map.of(
-                                                    "status", "not_started",
+                                            return Mono.just(ResponseEntity.ok(Map.<String, Object>of(
+                                                    "status", "success",
+                                                    "kycStatus", "not_started",
                                                     "require", true
-                                            );
-                                            return Mono.just(ResponseEntity.ok(response));
+                                            )));
                                         });
                             });
-                });
+                })
+                .defaultIfEmpty(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                        .body(Map.<String, Object>of(
+                                "status", "error",
+                                "message", "Invalid or missing authentication"
+                        )));
     }
 
     private String calculateHmac(byte[] payload, String secretKey, String algorithm) {
